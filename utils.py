@@ -1,14 +1,22 @@
-# Helpers: logging, screenshots
+# utils.py
+import os
 import time
-import csv
-from datetime import datetime
 
-def log_profile(profile_id, prompt, comment):
-    timestamp = datetime.now().isoformat()
-    with open("logs/profile_log.csv", "a") as f:
-        writer = csv.writer(f)
-        writer.writerow([profile_id, prompt, comment, timestamp])
+def log_profile(index: int, prompt: str, action: str, base_dir: str = "logs"):
+    os.makedirs(base_dir, exist_ok=True)
+    path = os.path.join(base_dir, "run.log")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] #{index:04d} | {action} | {prompt}\n"
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[log_profile] error: {e}")
 
-def take_screenshot(driver, profile_id):
-    filepath = f"screenshots/profile_{profile_id:03d}.png"
-    driver.save_screenshot(filepath)
+def take_screenshot(driver, index: int, base_dir: str = "shots"):
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+        path = os.path.join(base_dir, f"profile_{index:04d}.png")
+        driver.save_screenshot(path)
+    except Exception as e:
+        print(f"[take_screenshot] error: {e}")
