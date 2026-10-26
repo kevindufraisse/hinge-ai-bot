@@ -1,4 +1,6 @@
 # ai_commenter.py
+import re
+
 from openai import OpenAI
 from config import OPENAI_API_KEY
 
@@ -7,6 +9,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 MODEL = "gpt-5.2"
 MAX_LEN = 80
 N_CANDIDATES = 4
+
+FALLBACK = "do you want to know a secret?"
+
 
 def _soft_trim(s: str, limit: int = MAX_LEN) -> str:
     s = " ".join(s.split())
@@ -17,43 +22,38 @@ def _soft_trim(s: str, limit: int = MAX_LEN) -> str:
         cut = cut[:cut.rfind(" ")].rstrip()
     return cut if cut else s[:limit].rstrip()
 
-def _score_candidate(text: str) -> float:
-    score = 0.0
-    if "?" in text:
-        score += 2.0
-    if len(text) >= 40:
-        score += 1.0
-    if len(text) <= MAX_LEN:
-        score += 1.0
 
-    generic = ["haha", "lol", "so true", "interesting", "wow"]
-    if any(w in text.lower() for w in generic):
-        score -= 1.5
+def _clean_line(line: str) -> str:
+    """Enlève un éventuel marqueur de liste ('1.', '-', '•') sans casser les
+    messages qui commencent légitimement par un chiffre."""
+    line = line.strip()
+    line = re.sub(r"^(?:\d+[.)]\s*|[-•*]\s+)", "", line)
+    return line.strip().strip('"').strip()
 
-    return score
 
-SYSTEM_PROMPT = f"""You write irresistible Hinge comments that spark conversations.
+SYSTEM_PROMPT = f"""You write the first Hinge message that gets a reply.
 
-THE GOAL: Make them think "this person actually read my profile AND is interesting"
+You only see ONE prompt + its answer. No name, no photos, nothing else.
+Never invent details — work with exactly what's given.
 
-CONSTRAINTS:
-- Max {MAX_LEN} chars, single line, no quotes
-- Sound like a text from a clever friend, not a copywriter
+GOAL: a reply. It must sound written for THIS person, not for anyone.
 
-STRATEGY (pick ONE):
-A) Hyper-specific callback → reference an oddly specific detail
-B) Playful challenge → light disagreement that invites banter  
-C) Self-aware confession → relatable vulnerability with humor
-D) Pattern interrupt → say something unexpected that makes them pause
+RULES
+- One line, under {MAX_LEN} chars, no quotes (pasted via clipboard).
+- Reference something specific: a detail, a number, a named thing, an opinion.
+- One hook only. End with a question that's easy to answer — unless the line already invites a reply.
+- Mirror their tone (casual / witty / deadpan). Don't copy it.
 
-HARD NOs:
-- Generic praise ("love this!", "you seem fun")
-- Questions that feel like a job interview
-- Anything that could be sent to 100 people unchanged
-- Emojis as emotional crutches
+HARD NOs
+- Complimenting looks or the prompt itself ("great answer", "love this").
+- Asking something they already answered in the snippet.
+- A line you could send to 100 people unchanged.
+- Emojis as personality, intensity, or being over-familiar.
 
-VIBE CHECK: Read it back. Does it sound like a real person with a personality, or a bot trying to sound casual? If the latter, rewrite.
+IF THE ANSWER IS VAGUE OR EMPTY
+- Make a light, self-aware comment about the situation — playful, not mean.
 """
+
 
 def get_ai_comment(prompt: str) -> str:
     if not prompt:
@@ -63,7 +63,13 @@ def get_ai_comment(prompt: str) -> str:
         response = client.responses.create(
             model=MODEL,
             instructions=SYSTEM_PROMPT,
-            input=f"Hinge prompt: {prompt}\nWrite {N_CANDIDATES} different comments, one per line.",
+            input=(
+                "You only have this ONE snippet from their profile "
+                "(no name, no photos, nothing else). Never invent details.\n\n"
+                f"{prompt}\n\n"
+                f"Write {N_CANDIDATES} different opening messages, "
+                "best first, one per line. Plain text, no numbering or bullets."
+            ),
             max_output_tokens=200,
             temperature=0.7,
         )
@@ -72,19 +78,16 @@ def get_ai_comment(prompt: str) -> str:
 
         candidates = []
         for line in raw.splitlines():
-            line = line.strip().lstrip("0123456789.-) ")
+            line = _clean_line(line)
             if line:
                 candidates.append(_soft_trim(line, MAX_LEN))
 
         if not candidates:
-            return "do you want to know a secret?"
+            return FALLBACK
 
-        valid_candidates = [c for c in candidates if c]
-        if not valid_candidates:
-            return "do you want to know a secret?"
-
-        return max(valid_candidates, key=_score_candidate)
+        # Le modèle a classé du meilleur au moins bon → on prend le premier.
+        return candidates[0]
 
     except Exception as e:
         print(f"[ai_commenter] OpenAI error: {e}")
-        return "do you want to know a secret?"
+        return FALLBACK

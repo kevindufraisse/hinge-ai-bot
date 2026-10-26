@@ -7,7 +7,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from config import APPIUM_CAPS
+from config import APPIUM_CAPS, resolve_device_name
 from ai_commenter import get_ai_comment
 from utils import log_profile, take_screenshot
 
@@ -22,6 +22,9 @@ from urllib3.exceptions import MaxRetryError, NewConnectionError
 APPIUM_SERVER_URL = os.environ.get("APPIUM_SERVER_URL", "http://127.0.0.1:4723")
 APPIUM_CONNECT_RETRIES = int(os.environ.get("APPIUM_CONNECT_RETRIES", "45"))
 APPIUM_CONNECT_DELAY = float(os.environ.get("APPIUM_CONNECT_DELAY", "1.0"))
+# Crash intermittent du serveur UIAutomator2 au démarrage (surtout Android 16/API 36).
+UIA2_LAUNCH_CRASH_RETRIES = int(os.environ.get("UIA2_LAUNCH_CRASH_RETRIES", "4"))
+UIA2_LAUNCH_CRASH_DELAY = float(os.environ.get("UIA2_LAUNCH_CRASH_DELAY", "5.0"))
 
 driver = None
 wait_short = None
@@ -39,9 +42,23 @@ def is_uia2_crash_msg(msg: str) -> bool:
         or "get /window/current/size" in m and "not running" in m
     )
 
+def _is_uia2_launch_crash(msg: str) -> bool:
+    """Détecte l'échec de démarrage du serveur UIAutomator2 (crash intermittent sur API 36)."""
+    if not msg:
+        return False
+    m = msg.lower()
+    return (
+        "instrumentation process cannot be initialized" in m
+        or "instrumentation process is not running" in m
+        or "process crashed" in m
+        or "instrumentation run failed" in m
+    )
+
+
 def _connect_remote(opts: UiAutomator2Options):
     """Connexion au serveur Appium avec retries (évite Connection refused si Appium démarre après le script)."""
     last_err = None
+    crash_attempts = 0
     for attempt in range(1, APPIUM_CONNECT_RETRIES + 1):
         try:
             return Remote(APPIUM_SERVER_URL, options=opts)
@@ -60,6 +77,25 @@ def _connect_remote(opts: UiAutomator2Options):
                 last_err = e
                 time.sleep(APPIUM_CONNECT_DELAY)
                 continue
+            # Crash intermittent du serveur UIAutomator2 (surtout Android 16/API 36) :
+            # on retente un nombre limité de fois avant d'abandonner.
+            if _is_uia2_launch_crash(str(e)):
+                crash_attempts += 1
+                last_err = e
+                if crash_attempts <= UIA2_LAUNCH_CRASH_RETRIES:
+                    print(
+                        f"♻️  Serveur UIAutomator2 crashé au démarrage "
+                        f"(tentative {crash_attempts}/{UIA2_LAUNCH_CRASH_RETRIES}) — "
+                        f"nouvel essai dans {UIA2_LAUNCH_CRASH_DELAY}s…"
+                    )
+                    time.sleep(UIA2_LAUNCH_CRASH_DELAY)
+                    continue
+                raise RuntimeError(
+                    "Le serveur UIAutomator2 crashé à répétition au démarrage. "
+                    "Piste principale : émulateur Android 16/17 trop récent pour "
+                    "appium-uiautomator2. Utilise un émulateur Android 14 (API 34) "
+                    "ou 15 (API 35)."
+                ) from e
             raise
     raise RuntimeError(
         f"Impossible de joindre Appium sur {APPIUM_SERVER_URL} après "
@@ -80,6 +116,8 @@ def new_session():
     opts = UiAutomator2Options()
     for k, v in APPIUM_CAPS.items():
         opts.set_capability(k, v)
+    # Re-détecte l'UDID à chaque session (l'émulateur change de port au reboot).
+    opts.set_capability("deviceName", resolve_device_name())
 
     driver = _connect_remote(opts)
     APP_PKG = APPIUM_CAPS["appPackage"]
